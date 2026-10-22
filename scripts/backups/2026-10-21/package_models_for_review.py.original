@@ -1,0 +1,51 @@
+"""Create timestamped review ZIP with dense outputs but without huge MVS workspaces."""
+import argparse
+import re
+import zipfile
+from datetime import datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def main():
+    p=argparse.ArgumentParser(description='Package models and experiment logs safely')
+    p.add_argument('--runs', nargs='+',required=True,help='office_26/office_undistorted_6img ...')
+    p.add_argument('--include-depth-maps',action='store_true',
+                   help='Include potentially very large dense/stereo depth maps and normal maps')
+    args=p.parse_args()
+    all_files=[]
+    for item in args.runs:
+        if not re.fullmatch(r'[A-Za-z0-9_-]+/[A-Za-z0-9_-]+',item):
+            p.error('Use group/run IDs, e.g. office_26/office_undistorted_6img')
+        group,run=item.split('/')
+        exp=ROOT/'experiments'/group/run
+        if not (exp/'summary.json').is_file():
+            p.error(f'Experiment not found: {exp}')
+        ma=ROOT/'mapanything_output'/group/run/'scene.glb'
+        co=ROOT/'colmap_output'/group/run
+        # Avoid re-including full images and previous ZIP files under inspection directories.
+        all_files += [f for f in exp.rglob('*') if f.is_file() and
+                      'input_images' not in f.relative_to(exp).parts and f.suffix.lower()!='.zip']
+        if ma.is_file():
+            all_files.append(ma)
+        sparse=co/'sparse'
+        if sparse.is_dir():
+            all_files += [f for f in sparse.rglob('*') if f.is_file()]
+        dense=co/'dense'
+        for n in ('fused.ply','meshed-poisson.ply'):
+            f=dense/n
+            if f.is_file():
+                all_files.append(f)
+        if args.include_depth_maps and dense.is_dir():
+            all_files += [f for f in dense.rglob('*') if f.is_file()]
+    target=ROOT/'experiments'/f'models_for_review_dense_{datetime.now():%Y%m%d_%H%M%S_%f}.zip'
+    unique=list(dict.fromkeys(all_files))
+    with zipfile.ZipFile(target,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=2,allowZip64=True) as z:
+        for f in unique:
+            z.write(f,arcname=f.relative_to(ROOT).as_posix())
+    print(f'Review ZIP created: {target}\nFile count: {len(unique)}\nSize: {target.stat().st_size/(1024*1024):.1f} MiB')
+    print('Note: by default intermediate dense/stereo depth maps are not archived.')
+
+if __name__=='__main__':
+    main()

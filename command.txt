@@ -1,0 +1,59 @@
+cd C:\Users\TUF-Z490_Sch\Desktop\capstone_3d\tools\map-anything
+conda activate mapanything
+cd capstone_3d\tools\map-anything
+python scripts\gradio_app.py
+or
+python tools\map-anything\scripts\gradio_app.py
+
+
+-------------------
+tools\COLMAP\COLMAP.bat gui
+
+cd /d C:\Users\TUF-Z490_Sch\Desktop\capstone_3d
+
+mkdir colmap_output\comparison_01
+mkdir colmap_output\comparison_01\sparse
+
+Image:
+dir data\comparison_01
+
+
+3. Run feature extraction again on the image
+For now, use a single-line command. It avoids problems with ^ line continuation:
+tools\COLMAP\COLMAP.bat feature_extractor --database_path colmap_output\comparison_01\database.db --image_path data\comparison_01
+tools\COLMAP\COLMAP.bat feature_extractor --database_path colmap_output\comparison_03-120sec\database.db --image_path data\comparison_03-120sec
+tools\COLMAP\COLMAP.bat feature_extractor --database_path colmap_output\smoke_test\database.db --image_path data\mapanything_smoke_test
+
+Before matching, I would do one quick check:
+dir colmap_output\comparison_01\database.db
+dir colmap_output\comparison_03-120sec\database.db
+dir colmap_output\smoke_test\database.db
+
+Then run the exhaustive matcher Match features between the images 18.6:
+tools\COLMAP\COLMAP.bat exhaustive_matcher --database_path colmap_output\comparison_01\database.db
+tools\COLMAP\COLMAP.bat exhaustive_matcher --database_path colmap_output\comparison_03\database.db
+tools\COLMAP\COLMAP.bat exhaustive_matcher --database_path colmap_output\comparison_03-120sec\database.db
+tools\COLMAP\COLMAP.bat exhaustive_matcher --database_path colmap_output\smoke_test\database.db
+
+But you do not need all 190 pairs to match. Photos far apart in your capture sequence may have little or no overlap.
+Run this one-line command:
+python -c "import sqlite3; db=sqlite3.connect(r'colmap_output\comparison_01\database.db'); c=db.cursor(); print('images:',c.execute('SELECT COUNT(*) FROM images').fetchone()[0]); print('raw match pairs:',c.execute('SELECT COUNT(*) FROM matches').fetchone()[0]); print('verified pairs:',c.execute('SELECT COUNT(*) FROM two_view_geometries').fetchone()[0]); db.close()"
+python -c "import sqlite3; db=sqlite3.connect(r'colmap_output\comparison_03\database.db'); c=db.cursor(); print('images:',c.execute('SELECT COUNT(*) FROM images').fetchone()[0]); print('raw match pairs:',c.execute('SELECT COUNT(*) FROM matches').fetchone()[0]); print('verified pairs:',c.execute('SELECT COUNT(*) FROM two_view_geometries').fetchone()[0]); db.close()"
+python -c "import sqlite3; db=sqlite3.connect(r'colmap_output\comparison_03-120sec\database.db'); c=db.cursor(); print('images:',c.execute('SELECT COUNT(*) FROM images').fetchone()[0]); print('raw match pairs:',c.execute('SELECT COUNT(*) FROM matches').fetchone()[0]); print('verified pairs:',c.execute('SELECT COUNT(*) FROM two_view_geometries').fetchone()[0]); db.close()"
+python -c "import sqlite3; db=sqlite3.connect(r'colmap_output\smoke_test\database.db'); c=db.cursor(); print('images:',c.execute('SELECT COUNT(*) FROM images').fetchone()[0]); print('raw match pairs:',c.execute('SELECT COUNT(*) FROM matches').fetchone()[0]); print('verified pairs:',c.execute('SELECT COUNT(*) FROM two_view_geometries').fetchone()[0]); db.close()"
+
+Run Structure-from-Motion reconstruction 18.7 :
+tools\COLMAP\COLMAP.bat mapper --database_path colmap_output\comparison_01\database.db --image_path data\comparison_01 --output_path colmap_output\comparison_01\sparse
+tools\COLMAP\COLMAP.bat mapper --database_path colmap_output\comparison_03\database.db --image_path data\comparison_03 --output_path colmap_output\comparison_03\sparse
+tools\COLMAP\COLMAP.bat mapper --database_path colmap_output\comparison_03-120sec\database.db --image_path data\comparison_03-120sec --output_path colmap_output\comparison_03-120sec\sparse
+tools\COLMAP\COLMAP.bat mapper --database_path colmap_output\smoke_test\database.db --image_path data\mapanything_smoke_test --output_path colmap_output\smoke_test\sparse
+
+
+18.8 Now run COLMAP's official reconstruction analyser:
+Run:
+tools\COLMAP\COLMAP.bat model_analyzer --path colmap_output\comparison_01\sparse\0
+tools\COLMAP\COLMAP.bat model_analyzer --path colmap_output\comparison_01\sparse\0 > experiments\comparison_01_colmap_stats.txt
+tools\COLMAP\COLMAP.bat model_analyzer --path colmap_output\comparison_03\sparse\0
+tools\COLMAP\COLMAP.bat model_analyzer --path colmap_output\comparison_03-120sec\sparse\0
+tools\COLMAP\COLMAP.bat model_analyzer --path colmap_output\smoke_test\sparse\0
+tools\COLMAP\COLMAP.bat model_analyzer --path "colmap_output\smoke_test\sparse\0" > "experiments\colmap_smoke_test_stats.txt" 2>&1

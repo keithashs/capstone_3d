@@ -1,0 +1,23 @@
+# Ignore every item in the project root first.
+/*
+
+# Keep only repository documentation and scripts.
+!/.gitignore
+!/README.md
+!/scripts/
+!/scripts/**
+!/command.txt
+
+# Generated Python and Jupyter files.
+/scripts/**/__pycache__/
+*.py[cod]
+/scripts/**/.ipynb_checkpoints/
+
+# Exclude notebooks for now because they contain old computer paths,
+# saved outputs, filenames, and embedded preview images.
+/scripts/*.ipynb
+/scripts/**/*.ipynb
+
+# Temporary script outputs.
+/scripts/**/*.log
+/scripts/**/*.tmp
