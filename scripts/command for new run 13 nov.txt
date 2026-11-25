@@ -1,0 +1,15 @@
+From PowerShell on the Home Team workstation, run each command after the previous one succeeds:
+
+Set-Location -LiteralPath 'C:\Users\Home Team\Documents\capstone_3d'
+$dataset = 'e2_04_03_77_20261027_015732_676342'
+$run = 'blackwell_sc_gc_colmap_v2'
+
+python scripts\run_compare_blackwell.py --preflight --method colmap
+
+python scripts\run_compare_blackwell.py --dataset $dataset --limit 0 --expected-image-count 165 --run $run --sift-max-size 1600 --sift-ratio 0.8 --mvs-max-size 1000 --camera-model SIMPLE_RADIAL --single-camera --geom-consistency --method colmap --patch-match-window-radius 7 --patch-match-sigma-spatial 5 --poisson-trim 6
+
+python scripts\inspect_models-blackwell.py --dataset $dataset --run $run
+
+python scripts\visualize_colmap_stages.py --dataset $dataset --run $run --all-images --max-keypoints 0 --max-points 0 --max-faces 0
+
+python scripts\package_models_for_review.py --runs "$dataset/$run" --label e2_165_blackwell_sc_gc_colmap_v2

@@ -16,10 +16,10 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
+from reconstruction_pipeline import validate_component
+
 ROOT = Path(__file__).resolve().parent.parent
-RUN_RE = re.compile(r'([A-Za-z0-9_-]+)/([A-Za-z0-9_-]+)')
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp'}
-ALIASES = {'gerrad-hall': 'gerrard-hall', 'garred-hall': 'gerrard-hall'}
 
 RUN_FIELDS = [
     'run_ref', 'dataset', 'scene_group', 'run_id', 'profile', 'input_images',
@@ -27,6 +27,7 @@ RUN_FIELDS = [
     'snapshot_fingerprint_sha256', 'input_snapshot_valid', 'source_files_match',
     'sift_max_size', 'sift_ratio', 'sift_ratio_source', 'mvs_max_size',
     'single_camera', 'camera_model', 'geom_consistency',
+    'apply_confidence_mask', 'confidence_percentile',
     'mapanything_status', 'mapanything_elapsed_seconds',
     'mapanything_peak_gpu_memory_mib', 'mapanything_gpu_oom',
     'mapanything_vertices', 'mapanything_triangles',
@@ -46,28 +47,30 @@ METRICS = {
     'colmap.elapsed_seconds': ('colmap_elapsed_seconds', 'lower'),
     'colmap.peak_gpu_memory_mib': ('colmap_peak_gpu_memory_mib', 'lower'),
     'colmap.keypoints': ('colmap_keypoints', 'neutral'),
-    'colmap.verified_pairs': ('colmap_verified_pairs', 'higher'),
+    'colmap.verified_pairs': ('colmap_verified_pairs', 'neutral'),
     'colmap.registered_images': ('colmap_registered_images', 'higher'),
     'colmap.registration_rate_percent': ('colmap_registration_rate_percent', 'higher'),
-    'colmap.sparse_points': ('colmap_sparse_points', 'higher'),
+    'colmap.sparse_points': ('colmap_sparse_points', 'neutral'),
     'colmap.mean_reprojection_error_px': ('colmap_mean_reprojection_error_px', 'lower'),
-    'colmap.dense_points': ('colmap_dense_points', 'higher'),
-    'colmap.mesh_faces': ('colmap_mesh_faces', 'higher'),
+    'colmap.dense_points': ('colmap_dense_points', 'neutral'),
+    'colmap.mesh_faces': ('colmap_mesh_faces', 'neutral'),
     'total_benchmark_seconds': ('total_benchmark_seconds', 'lower'),
 }
 
 SETTING_FIELDS = [
     'sift_max_size', 'sift_ratio', 'mvs_max_size', 'single_camera',
-    'camera_model', 'geom_consistency'
+    'camera_model', 'geom_consistency', 'apply_confidence_mask', 'confidence_percentile'
 ]
 
 
 def canonical_run_ref(value):
-    match = RUN_RE.fullmatch(value.replace('\\', '/'))
-    if not match:
-        raise ValueError('Use group/run IDs, e.g. office_26/office_undistorted_6img')
-    group, run_id = match.groups()
-    return f"{ALIASES.get(group, group)}/{run_id}"
+    parts = value.replace('\\', '/').split('/')
+    if len(parts) != 2:
+        raise ValueError('Use dataset/run IDs, e.g. my_dataset/local_v1')
+    group, run_id = parts
+    validate_component(group, 'dataset/group')
+    validate_component(run_id, 'run')
+    return f'{group}/{run_id}'
 
 
 def sha256(path, cache=None):
@@ -105,6 +108,21 @@ def read_manifest(path):
     required = {'filename', 'original_path', 'bytes', 'sha256'}
     if not rows or not required.issubset(rows[0]):
         raise ValueError(f'Invalid or empty input manifest: {path}')
+    seen = set()
+    for row in rows:
+        name = row['filename']
+        if (not name or name in {'.', '..'} or '/' in name or '\\' in name or
+                ':' in name or name.casefold() in seen):
+            raise ValueError(f'Unsafe or duplicate input filename in {path}: {name!r}')
+        if not re.fullmatch(r'[0-9a-fA-F]{64}', row['sha256'] or ''):
+            raise ValueError(f'Invalid input SHA256 in {path}: {name!r}')
+        try:
+            size = int(row['bytes'])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f'Invalid input byte count in {path}: {name!r}') from exc
+        if size < 0:
+            raise ValueError(f'Negative input byte count in {path}: {name!r}')
+        seen.add(name.casefold())
     return rows
 
 
@@ -146,22 +164,24 @@ def get_settings(run):
         sift_size, _ = command_setting(summary, '--FeatureExtraction.max_image_size', int)
     ratio = settings.get('sift_ratio')
     ratio_source = 'recorded_settings' if ratio is not None else None
-    if ratio is None:
+    version_evidence = str(environment.get('colmap_version') or environment.get('colmap_help') or '')
+    if ratio is None and re.search(r'COLMAP\s+4\.2(?:\.|\s|$)', version_evidence, re.I):
         ratio, ratio_source = command_setting(summary, '--SiftMatching.max_ratio', float)
     if ratio is None:
         # Earlier runs omitted the flag. COLMAP 4.2 reports 0.8 as its default.
         ratio, ratio_source = 0.8, 'inferred_colmap_4_2_default'
     return {
-        'profile': settings.get('profile', 'legacy_or_custom'),
+        'profile': settings.get('profile', 'unspecified'),
         'sift_max_size': sift_size,
         'sift_ratio': ratio,
         'sift_ratio_source': ratio_source,
         'mvs_max_size': settings.get('mvs_max_size'),
         'single_camera': settings.get('single_camera'),
-        'camera_model': settings.get(
-            'camera_model', 'PINHOLE' if str(summary.get('dataset', '')).endswith('_undistorted')
-            else 'SIMPLE_RADIAL'),
+        'camera_model': settings.get('camera_model'),
         'geom_consistency': settings.get('geom_consistency'),
+        # Historical runs did not record these settings. Do not infer defaults.
+        'apply_confidence_mask': settings.get('apply_confidence_mask'),
+        'confidence_percentile': settings.get('confidence_percentile'),
     }
 
 
@@ -322,6 +342,13 @@ def compare_runs(pair_index, baseline, candidate):
         'baseline_colmap_status': baseline.get('colmap_status'),
         'candidate_colmap_status': candidate.get('colmap_status'),
     }
+    for row in (baseline, candidate):
+        if (row.get('mapanything_status') not in (None, 'not_run', 'skipped') and
+                (row.get('apply_confidence_mask') is None or
+                 (row.get('apply_confidence_mask') and row.get('confidence_percentile') is None))):
+            if same_input:
+                pair_row['comparison_type'] = 'incomplete_confidence_provenance'
+            break
     differences = []
     for metric_name, (field, preferred) in METRICS.items():
         baseline_value = number(baseline.get(field))
@@ -330,8 +357,25 @@ def compare_runs(pair_index, baseline, candidate):
                       if baseline_value is not None and candidate_value is not None else None)
         percent = (difference / abs(baseline_value) * 100
                    if difference is not None and baseline_value != 0 else None)
+        method = metric_name.split('.', 1)[0]
+        completed = (method not in {'colmap', 'mapanything'} or
+                     (baseline.get(method + '_status') == 'success' and
+                      candidate.get(method + '_status') == 'success'))
+        if metric_name == 'colmap.elapsed_seconds':
+            mesh_states = (baseline.get('colmap_mesh_status'), candidate.get('colmap_mesh_status'))
+            completed = completed and mesh_states[0] == mesh_states[1] and mesh_states[0] in {'success', 'skipped'}
+        if metric_name == 'total_benchmark_seconds':
+            completed = any(baseline.get(m + '_status') == 'success' for m in ('colmap', 'mapanything'))
+            for name in ('colmap', 'mapanything'):
+                base_status, cand_status = baseline.get(name + '_status'), candidate.get(name + '_status')
+                completed = completed and base_status == cand_status and base_status in {'success', 'not_run', 'skipped'}
+            if baseline.get('colmap_status') == 'success':
+                mesh_states = (baseline.get('colmap_mesh_status'), candidate.get('colmap_mesh_status'))
+                completed = completed and mesh_states[0] == mesh_states[1] and mesh_states[0] in {'success', 'skipped'}
         if difference is None:
             outcome = 'not_available'
+        elif not completed:
+            outcome = 'not_comparable_incomplete_method'
         elif difference == 0:
             outcome = 'no_change'
         elif preferred == 'higher':
@@ -359,18 +403,22 @@ def write_csv(path, rows, fields):
         writer.writerows(rows)
 
 
-def collect_model_files(runs, include_depth_maps):
+def collect_model_files(runs, include_depth_maps, include_stage_inputs=False):
     files = []
     for run in runs:
         exp = run['experiment']
         group, run_id = run['group'], run['run_id']
         files.extend(path for path in exp.rglob('*') if path.is_file() and
-                     'input_images' not in path.relative_to(exp).parts and
+                     (include_stage_inputs or 'input_images' not in path.relative_to(exp).parts) and
                      path.suffix.lower() != '.zip')
         ma = ROOT / 'mapanything_output' / group / run_id / 'scene.glb'
         if ma.is_file():
             files.append(ma)
         colmap = ROOT / 'colmap_output' / group / run_id
+        if include_stage_inputs:
+            database = colmap / 'database.db'
+            if database.is_file():
+                files.append(database)
         sparse = colmap / 'sparse'
         if sparse.is_dir():
             files.extend(path for path in sparse.rglob('*') if path.is_file())
@@ -402,6 +450,23 @@ def markdown_report(run_rows, verification_rows, pair_rows):
                      f"{row['sift_max_size']} | {row['sift_ratio']} | "
                      f"{row['mapanything_status']} | {row['colmap_status']} | "
                      f"{row['colmap_registered_images']} | {row['colmap_dense_points']} |")
+    ma_rows = [row for row in run_rows
+               if row.get('mapanything_status') not in (None, 'not_run', 'skipped')]
+    if ma_rows:
+        lines += ['', '## MapAnything confidence settings', '',
+                  '| Run | Confidence mask | Confidence percentile |',
+                  '| --- | --- | --- |']
+        for row in ma_rows:
+            enabled = row.get('apply_confidence_mask')
+            percentile = row.get('confidence_percentile')
+            lines.append(f"| {row['run_ref']} | "
+                         f"{enabled if enabled is not None else 'not recorded'} | "
+                         f"{percentile if percentile is not None else 'not recorded'} |")
+        lines += ['', 'The percentile is inactive when the confidence mask is off. '
+                  'Missing historical settings are not assumed to be off or to use percentile 10. '
+                  'Comparisons with missing confidence settings are labelled '
+                  '`incomplete_confidence_provenance`. Confidence filtering is not equivalent '
+                  'to COLMAP geometric consistency.']
     if pair_rows:
         lines += ['', '## Pair checks', '',
                   '| Pair | Baseline | Candidate | Same inputs | Changed settings | Type |',
@@ -414,8 +479,11 @@ def markdown_report(run_rows, verification_rows, pair_rows):
                   'Positive difference means candidate minus baseline. Percent difference is '
                   'blank when the baseline is zero or either value is unavailable.']
     lines += ['', '## Interpretation limits', '',
+              '- A valid saved input snapshot remains valid even if the original source path is unavailable on another PC.',
               '- Point counts, triangle counts, and file sizes do not measure geometric accuracy.',
+              '- Numerical increases in point/triangle counts are reported as changes, not proven quality improvements.',
               '- A comparison with more than one changed setting cannot isolate one setting as the cause.',
+              '- Equal recorded settings do not control hardware, software versions, or stochastic reconstruction behaviour.',
               '- A failed MapAnything runtime is time to failure, not a completed reconstruction time.',
               '- Whole-GPU memory samples include other Windows WDDM processes.', '']
     return '\n'.join(lines)
@@ -426,11 +494,16 @@ def main():
         description='Verify inputs, compare metrics, export CSV reports, and package models')
     parser.add_argument('--runs', nargs='*', default=[],
                         help='group/run references to inspect and package')
+    parser.add_argument('--dataset', help='Output dataset/group for a single run')
+    parser.add_argument('--run', help='Single run ID; requires --dataset')
     parser.add_argument('--compare', nargs=2, action='append', default=[],
                         metavar=('BASELINE', 'CANDIDATE'),
                         help='Pair to compare; repeat for multiple scenes')
     parser.add_argument('--include-depth-maps', action='store_true',
                         help='Include potentially very large dense/stereo intermediate files')
+    parser.add_argument('--include-stage-inputs', action='store_true',
+                        help='Also include database.db and saved input_images for stages 1-3; '
+                             'combine with --include-depth-maps to replot all saved stages elsewhere')
     parser.add_argument('--report-only', action='store_true',
                         help='Write verification/comparison reports without creating a ZIP')
     parser.add_argument('--allow-input-mismatch', action='store_true',
@@ -446,6 +519,12 @@ def main():
         parser.error('--label may contain only letters, numbers, underscores and hyphens')
     refs = []
     try:
+        if bool(args.dataset) != bool(args.run):
+            raise ValueError('--dataset and --run must be provided together')
+        if args.dataset and args.runs:
+            raise ValueError('Use --dataset/--run or --runs, not both')
+        if args.dataset:
+            refs.append(canonical_run_ref(f'{args.dataset}/{args.run}'))
         for value in args.runs:
             refs.append(canonical_run_ref(value))
         comparisons = []
@@ -524,7 +603,7 @@ def main():
     if args.report_only:
         return 0
 
-    model_files = collect_model_files(runs, args.include_depth_maps)
+    model_files = collect_model_files(runs, args.include_depth_maps, args.include_stage_inputs)
     report_files = [path for path in report_dir.iterdir() if path.is_file()]
     package_rows = [{'path': path.relative_to(ROOT).as_posix(), 'bytes': path.stat().st_size}
                     for path in model_files + report_files]
@@ -541,6 +620,8 @@ def main():
     print(f'Size: {target.stat().st_size / (1024 * 1024):.1f} MiB')
     if not args.include_depth_maps:
         print('Intermediate dense/stereo depth and normal maps were not archived.')
+    if not args.include_stage_inputs:
+        print('COLMAP database and saved input_images were not archived; keep the original run folders.')
     return 0
 
 

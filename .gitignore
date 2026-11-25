@@ -7,6 +7,22 @@
 !/scripts/
 !/scripts/**
 !/command.txt
+!/PROGRESS.md
+!/tests/
+!/tests/**
+/tests/**/__pycache__/
+!/docs/
+/docs/*
+!/docs/SINGLE_DATASET_WORKFLOW.md
+!/docs/MARBLE_QUICKSTART.md
+!/docs/Capstone_Development_Log_27_Oct_2026.md
+!/docs/validation_27_Oct_2026/
+/docs/validation_27_Oct_2026/*
+!/docs/validation_27_Oct_2026/datasets.json
+!/docs/validation_27_Oct_2026/*_selected_images.csv
+!/docs/validation_27_Oct_2026/validation_results.json
+!/docs/validation_27_Oct_2026/test_results.txt
+!/docs/validation_27_Oct_2026/doctor.json
 
 # Generated Python and Jupyter files.
 /scripts/**/__pycache__/
